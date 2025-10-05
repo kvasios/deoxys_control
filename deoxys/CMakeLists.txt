@@ -27,7 +27,7 @@ message("${_GLIBCXX_USE_CXX11_ABI}")
 find_package(Protobuf REQUIRED)
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/protobuf.cmake)
-include(${CMAKE_CURRENT_LIST_DIR}/libfranka/cmake/FindEigen3.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/../../libfranka/cmake/FindEigen3.cmake)
 
 # cmake-format: off
 #  ____            _        _            __
