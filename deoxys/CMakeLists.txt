@@ -1,5 +1,9 @@
 cmake_minimum_required (VERSION 3.10)
-set(CMAKE_INSTALL_RPATH_USE_LINK_PATH FALSE)
+
+# Enable RPATH for proper runtime library resolution
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+set(CMAKE_INSTALL_RPATH "/usr/local/lib")
 
 project (deoxys
   VERSION 0.1.0
