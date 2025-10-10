@@ -72,16 +72,49 @@ if (BUILD_FRANKA)
     message(STATUS "System libfranka not found; building bundled libfranka")
     add_subdirectory(libfranka)
   endif()
-  add_subdirectory(zmqpp)
-  add_subdirectory(spdlog)
+  
+  # Discover spdlog: prefer system, fallback to bundled if available
+  find_package(spdlog QUIET)
+  if (NOT spdlog_FOUND)
+    if (EXISTS "${CMAKE_CURRENT_LIST_DIR}/../spdlog/CMakeLists.txt")
+      add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../spdlog" "${CMAKE_BINARY_DIR}/spdlog")
+    else()
+      message(FATAL_ERROR "spdlog not found. Install system package or add submodule at ../spdlog")
+    endif()
+  endif()
 
-  set(YAML_BUILD_SHARED_LIBS ON CACHE BOOL "BUild shared library of yaml-cpp")
-  set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "")
-  add_subdirectory(yaml-cpp)
-  include_directories(zmqpp/src)
+  # Discover yaml-cpp: prefer system, fallback to bundled if available
+  find_package(yaml-cpp QUIET)
+  if (NOT yaml-cpp_FOUND)
+    if (EXISTS "${CMAKE_CURRENT_LIST_DIR}/../yaml-cpp/CMakeLists.txt")
+      set(YAML_BUILD_SHARED_LIBS ON CACHE BOOL "Build shared library of yaml-cpp" FORCE)
+      set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+      add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../yaml-cpp" "${CMAKE_BINARY_DIR}/yaml-cpp")
+    else()
+      message(FATAL_ERROR "yaml-cpp not found. Install system package or add submodule at ../yaml-cpp")
+    endif()
+  endif()
+
+  # Discover zmqpp: try CMake package, then pkg-config, then bundled
+  find_package(zmqpp QUIET)
+  if (NOT zmqpp_FOUND)
+    include(FindPkgConfig)
+    pkg_check_modules(ZMQPP QUIET zmqpp)
+    if (ZMQPP_FOUND)
+      add_library(zmqpp INTERFACE)
+      target_include_directories(zmqpp INTERFACE ${ZMQPP_INCLUDE_DIRS})
+      target_link_libraries(zmqpp INTERFACE ${ZMQPP_LIBRARIES})
+    elseif (EXISTS "${CMAKE_CURRENT_LIST_DIR}/../zmqpp/CMakeLists.txt")
+      add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../zmqpp" "${CMAKE_BINARY_DIR}/zmqpp")
+    else()
+      message(FATAL_ERROR "zmqpp not found. Install system package or add submodule at ../zmqpp")
+    endif()
+  endif()
+
+  include_directories(franka-interface/include)
   include_directories(franka-interface/include)
 
-  set(FRANKA_LIBS Eigen3::Eigen3 Franka::Franka Threads::Threads zmqpp yaml-cpp spdlog)
+  set(FRANKA_LIBS Eigen3::Eigen Franka::Franka Threads::Threads zmqpp yaml-cpp spdlog::spdlog)
 
   # Add your new controller files here
   set (CONTROLLERS
