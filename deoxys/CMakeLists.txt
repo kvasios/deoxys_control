@@ -52,6 +52,7 @@ message("FRANKA ${BUILD_FRANKA}")
 message("DEOXYS ${BUILD_DEOXYS}")
 
 if (BUILD_FRANKA)
+  option(USE_BUNDLED_FRANKA "Build bundled libfranka instead of using system package" OFF)
   message("${PROTO_NAMESPACE}")  
   add_proto_cc_library(shared_protobuf
     NAMESPACE ${PROTO_NAMESPACE}
@@ -64,13 +65,12 @@ if (BUILD_FRANKA)
   set(THREADS_PREFER_PTHREAD_FLAG ON)
   find_package(Threads REQUIRED)
 
-  # Prefer a system-provided libfranka via Franka_DIR; fall back to bundled
-  find_package(Franka QUIET)
-  if (Franka_FOUND)
-    message(STATUS "Using system libfranka (Franka_DIR='${Franka_DIR}')")
-  else()
-    message(STATUS "System libfranka not found; building bundled libfranka")
+  # System libfranka by default; bundled only if explicitly requested
+  if (USE_BUNDLED_FRANKA)
+    message(STATUS "USE_BUNDLED_FRANKA=ON: building bundled libfranka")
     add_subdirectory(libfranka)
+  else()
+    find_package(Franka REQUIRED)
   endif()
   
   # Discover spdlog: prefer system, fallback to bundled if available
@@ -111,7 +111,6 @@ if (BUILD_FRANKA)
     endif()
   endif()
 
-  include_directories(franka-interface/include)
   include_directories(franka-interface/include)
 
   set(FRANKA_LIBS Eigen3::Eigen Franka::Franka Threads::Threads zmqpp yaml-cpp spdlog::spdlog)
