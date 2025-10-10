@@ -52,8 +52,12 @@ clean_all: clean cleanup_cache
 cleanlogs:
 	(cd logs; rm -rf *.txt *.vraw *.?log *.log *.idx html/*.html)
 
+ifdef Franka_DIR
+	frankaDirArg=-DFranka_DIR=$(Franka_DIR)
+endif
+
 cmake: CMakeLists.txt
-	mkdir -p $(buildDir) && cd $(buildDir) && cmake -DCMAKE_BUILD_TYPE=$(cmakeBuildType) -DCMAKE_INSTALL_PREFIX=$(current_dir) -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=$(current_dir)  -DBUILD_DEOXYS=$(build_deoxys) -DBUILD_FRANKA=$(build_franka)  ..
+	mkdir -p $(buildDir) && cd $(buildDir) && cmake -DCMAKE_BUILD_TYPE=$(cmakeBuildType) -DCMAKE_INSTALL_PREFIX=$(current_dir) -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=$(current_dir)  -DBUILD_DEOXYS=$(build_deoxys) -DBUILD_FRANKA=$(build_franka) $(frankaDirArg)  ..
 
 docs: cmake
 	$(MAKE) --no-print-directory -C $(buildDir) docs

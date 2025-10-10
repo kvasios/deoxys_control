@@ -27,7 +27,7 @@ message("${_GLIBCXX_USE_CXX11_ABI}")
 find_package(Protobuf REQUIRED)
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/protobuf.cmake)
-include(${CMAKE_CURRENT_LIST_DIR}/../../libfranka/cmake/FindEigen3.cmake)
+
 
 # cmake-format: off
 #  ____            _        _            __
@@ -64,7 +64,14 @@ if (BUILD_FRANKA)
   set(THREADS_PREFER_PTHREAD_FLAG ON)
   find_package(Threads REQUIRED)
 
-  add_subdirectory(libfranka)
+  # Prefer a system-provided libfranka via Franka_DIR; fall back to bundled
+  find_package(Franka QUIET)
+  if (Franka_FOUND)
+    message(STATUS "Using system libfranka (Franka_DIR='${Franka_DIR}')")
+  else()
+    message(STATUS "System libfranka not found; building bundled libfranka")
+    add_subdirectory(libfranka)
+  endif()
   add_subdirectory(zmqpp)
   add_subdirectory(spdlog)
 
