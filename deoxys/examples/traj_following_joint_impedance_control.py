@@ -24,7 +24,7 @@ logger = get_deoxys_example_logger()
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--interface-cfg", type=str, default="charmander.yml")
+    parser.add_argument("--interface-cfg", type=str, default="servobox.yml")
     parser.add_argument(
         "--controller-cfg", type=str, default="joint-impedance-controller.yml"
     )

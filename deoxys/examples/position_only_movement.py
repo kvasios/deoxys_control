@@ -21,7 +21,7 @@ logger = get_deoxys_example_logger()
 def main():
     logger.warning("This is a beta script")
     robot_interface = FrankaInterface(
-        config_root + "/charmander.yml", use_visualizer=False
+        config_root + "/servobox.yml", use_visualizer=False
     )
     logger.debug("Robot interface initalized")
     position_only_gripper_move_by(robot_interface, delta_pos=[0.2, 0.05, 0], grasp=False)

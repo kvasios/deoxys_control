@@ -1,6 +1,6 @@
 PC:
   NAME: "kvasios"
-  IP: localhost
+  IP: 192.168.178.102
 
 NUC:
   NAME: "servobox-usr"

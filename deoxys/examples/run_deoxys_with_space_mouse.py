@@ -13,7 +13,7 @@ logger = get_deoxys_example_logger()
 def main():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--interface-cfg", type=str, default="config/charmander.yml")
+    parser.add_argument("--interface-cfg", type=str, default="config/servobox.yml")
     parser.add_argument("--controller-type", type=str, default="OSC_POSE")
 
     parser.add_argument("--vendor-id", type=int, default=9583)
