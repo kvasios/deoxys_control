@@ -364,185 +364,184 @@ int main(int argc, char **argv) {
               global_handler->termination = true;
               global_handler->logger->info("Received explicit termination command from client");
             }
-          }
-          // Determine controller message type
-          if (control_command.mutex.try_lock()) {
-            if (!GetControllerType(control_msg,
-                                   control_command.controller_type)) {
-              global_handler->logger->warn("No controller type is specified");
-            };
-            if (!GetTrajInterpolatorType(
-                    control_msg, control_command.traj_interpolator_type)) {
-              global_handler->logger->debug(
-                  "No traj interpolator is specified");
-            };
-            if (!GetStateEstimatorType(control_msg,
-                                       control_command.state_estimator_type)) {
-              global_handler->logger->debug("No state estimator is specified");
-            }
-            if (control_msg.traj_interpolator_time_fraction() > 0.10) {
-              global_handler->traj_interpolator_time_fraction =
-                  control_msg.traj_interpolator_time_fraction();
-            } else {
-              // if the time fraction is set to less than 1/10, then we consider
-              // it to be too dangerous
-              global_handler->traj_interpolator_time_fraction = 0.1;
-            }
-            control_command.timeout = control_msg.timeout();
-            control_command.control_msg = control_msg;
-            control_command.mutex.unlock();
-          }
-
-          if (control_command.controller_type == ControllerType::OSC_POSE &&
-              controller_type == ControllerType::NO_CONTROL) {
-            global_handler->controller_ptr =
-                std::make_shared<controller::OSCImpedanceController>(model);
-            global_handler->logger->info("Initialize OSC Pose");
-            global_handler->running = true;
-          } else if (control_command.controller_type ==
-                         ControllerType::OSC_POSITION &&
-                     controller_type == ControllerType::NO_CONTROL) {
-            global_handler->controller_ptr =
-                std::make_shared<controller::OSCPositionImpedanceController>(
-                    model);
-            global_handler->logger->info("Initialize OSC Position");
-            global_handler->running = true;
-          } else if (control_command.controller_type ==
-                         ControllerType::OSC_YAW &&
-                     controller_type == ControllerType::NO_CONTROL) {
-            global_handler->controller_ptr =
-                std::make_shared<controller::OSCYawImpedanceController>(model);
-            global_handler->logger->info("Initialize OSC Yaw");
-            global_handler->running = true;
-          } else if (control_command.controller_type ==
-                         ControllerType::JOINT_POSITION &&
-                     controller_type == ControllerType::NO_CONTROL) {
-            global_handler->controller_ptr =
-                std::make_shared<controller::JointPositionController>(model);
-            global_handler->logger->info("Initialize Joint Position");
-            global_handler->running = true;
-          } else if (control_command.controller_type ==
-                         ControllerType::JOINT_IMPEDANCE &&
-                     controller_type == ControllerType::NO_CONTROL) {
-            global_handler->controller_ptr =
-                std::make_shared<controller::JointImpedanceController>(model);
-            global_handler->logger->info("Initialize Joint Impedance");
-            global_handler->running = true;
-          } else if (control_command.controller_type ==
-                         ControllerType::CARTESIAN_VELOCITY &&
-                     controller_type == ControllerType::NO_CONTROL) {
-            global_handler->controller_ptr =
-                std::make_shared<controller::CartesianVelocityController>(model);
-            global_handler->logger->info("Initialize Cartesian Velocity");
-            global_handler->running = true;            
-          } else if (control_command.controller_type ==
-                         ControllerType::NO_CONTROL ||
-                     controller_type == ControllerType::NO_CONTROL) {
-            global_handler->running = false;
-            continue;
-          }
-
-          if (control_command.controller_type != ControllerType::NO_CONTROL &&
-              controller_type == ControllerType::NO_CONTROL) {
-            if (control_command.state_estimator_type ==
-                StateEstimatorType::EXPONENTIAL_SMOOTHING_ESTIMATOR) {
-              global_handler->controller_ptr->SetStateEstimator(
-                  std::make_shared<
-                      estimator_utils::ExponentialSmoothingEstimator>());
-              global_handler->logger->info("Initialize State Estimator");
-            }
-            state_estimator_type = control_command.state_estimator_type;
-          }
-
-          global_handler->start = true;
-          if (traj_interpolator_type !=
-              control_command.traj_interpolator_type) {
-            if (control_command.traj_interpolator_type ==
-                TrajInterpolatorType::LINEAR_POSE) {
-              global_handler->traj_interpolator_ptr =
-                  std::make_shared<traj_utils::LinearPoseTrajInterpolator>();
-              global_handler->logger->info("Initialize Pose interpolator!");
-            } else if (control_command.traj_interpolator_type ==
-                       TrajInterpolatorType::LINEAR_POSITION) {
-              global_handler->traj_interpolator_ptr = std::make_shared<
-                  traj_utils::LinearPositionTrajInterpolator>();
-              global_handler->logger->info("Initialize Position interpolator!");
-            } else if (control_command.traj_interpolator_type ==
-                       TrajInterpolatorType::MIN_JERK_POSE) {
-              global_handler->traj_interpolator_ptr =
-                  std::make_shared<traj_utils::MinJerkPoseTrajInterpolator>();
-              global_handler->logger->info(
-                  "Initialize Min Jerk Pose interpolator!");
-            } else if (control_command.traj_interpolator_type ==
-                       TrajInterpolatorType::SMOOTH_JOINT_POSITION) {
-              global_handler->traj_interpolator_ptr =
-                  std::make_shared<traj_utils::SmoothJointTrajInterpolator>();
-              global_handler->logger->info(
-                  "Initialize Smooth Joint Trajectory Interpolator");
-            } else if (control_command.traj_interpolator_type ==
-                       TrajInterpolatorType::MIN_JERK_JOINT_POSITION) {
-              global_handler->traj_interpolator_ptr = std::make_shared<
-                  traj_utils::MinJerkJointPositionTrajInterpolator>();
-              global_handler->logger->info(
-                  "Initialize Min Jerk Joint Position Trajectory Interpolator");
-            } else if (control_command.traj_interpolator_type ==
-                       TrajInterpolatorType::LINEAR_JOINT_POSITION) {
-              global_handler->traj_interpolator_ptr = std::make_shared<
-                  traj_utils::LinearJointPositionTrajInterpolator>();
-              global_handler->logger->info(
-                  "Initialize Linear Joint Position Trajectory Interpolator");
-            } else if (control_command.traj_interpolator_type == TrajInterpolatorType::COSINE_CARTESIAN_VELOCITY) {
-              global_handler->traj_interpolator_ptr = std::make_shared<
-                  traj_utils::CosineCartesianVelocityTrajInterpolator>();
-              global_handler->logger->info(
-                  "Initialize Cosine Cartesian Velocity Trajectory Interpolator");
-            } else if (control_command.traj_interpolator_type == TrajInterpolatorType::LINEAR_CARTESIAN_VELOCITY) {
-              global_handler->traj_interpolator_ptr = std::make_shared<
-                  traj_utils::LinearCartesianVelocityTrajInterpolator>();
-              global_handler->logger->info(
-                  "Initialize Linear Cartesian Velocity Trajectory Interpolator");
-            }else {
-              global_handler->logger->error("No interpolator is specified");
+            // Determine controller message type
+            if (control_command.mutex.try_lock()) {
+              if (!GetControllerType(control_msg,
+                                     control_command.controller_type)) {
+                global_handler->logger->warn("No controller type is specified");
+              };
+              if (!GetTrajInterpolatorType(
+                      control_msg, control_command.traj_interpolator_type)) {
+                global_handler->logger->debug(
+                    "No traj interpolator is specified");
+              };
+              if (!GetStateEstimatorType(control_msg,
+                                         control_command.state_estimator_type)) {
+                global_handler->logger->debug("No state estimator is specified");
+              }
+              if (control_msg.traj_interpolator_time_fraction() > 0.10) {
+                global_handler->traj_interpolator_time_fraction =
+                    control_msg.traj_interpolator_time_fraction();
+              } else {
+                // if the time fraction is set to less than 1/10, then we consider
+                // it to be too dangerous
+                global_handler->traj_interpolator_time_fraction = 0.1;
+              }
+              control_command.timeout = control_msg.timeout();
+              control_command.control_msg = control_msg;
+              control_command.mutex.unlock();
             }
 
-            traj_interpolator_type = control_command.traj_interpolator_type;
-          }
+            if (control_command.controller_type == ControllerType::OSC_POSE &&
+                controller_type == ControllerType::NO_CONTROL) {
+              global_handler->controller_ptr =
+                  std::make_shared<controller::OSCImpedanceController>(model);
+              global_handler->logger->info("Initialize OSC Pose");
+              global_handler->running = true;
+            } else if (control_command.controller_type ==
+                           ControllerType::OSC_POSITION &&
+                       controller_type == ControllerType::NO_CONTROL) {
+              global_handler->controller_ptr =
+                  std::make_shared<controller::OSCPositionImpedanceController>(
+                      model);
+              global_handler->logger->info("Initialize OSC Position");
+              global_handler->running = true;
+            } else if (control_command.controller_type ==
+                           ControllerType::OSC_YAW &&
+                       controller_type == ControllerType::NO_CONTROL) {
+              global_handler->controller_ptr =
+                  std::make_shared<controller::OSCYawImpedanceController>(model);
+              global_handler->logger->info("Initialize OSC Yaw");
+              global_handler->running = true;
+            } else if (control_command.controller_type ==
+                           ControllerType::JOINT_POSITION &&
+                       controller_type == ControllerType::NO_CONTROL) {
+              global_handler->controller_ptr =
+                  std::make_shared<controller::JointPositionController>(model);
+              global_handler->logger->info("Initialize Joint Position");
+              global_handler->running = true;
+            } else if (control_command.controller_type ==
+                           ControllerType::JOINT_IMPEDANCE &&
+                       controller_type == ControllerType::NO_CONTROL) {
+              global_handler->controller_ptr =
+                  std::make_shared<controller::JointImpedanceController>(model);
+              global_handler->logger->info("Initialize Joint Impedance");
+              global_handler->running = true;
+            } else if (control_command.controller_type ==
+                           ControllerType::CARTESIAN_VELOCITY &&
+                       controller_type == ControllerType::NO_CONTROL) {
+              global_handler->controller_ptr =
+                  std::make_shared<controller::CartesianVelocityController>(model);
+              global_handler->logger->info("Initialize Cartesian Velocity");
+              global_handler->running = true;            
+            } else if (control_command.controller_type ==
+                           ControllerType::NO_CONTROL ||
+                       controller_type == ControllerType::NO_CONTROL) {
+              global_handler->running = false;
+              continue;
+            }
 
-          global_handler->controller_ptr->ParseMessage(control_msg);
+            if (control_command.controller_type != ControllerType::NO_CONTROL &&
+                controller_type == ControllerType::NO_CONTROL) {
+              if (control_command.state_estimator_type ==
+                  StateEstimatorType::EXPONENTIAL_SMOOTHING_ESTIMATOR) {
+                global_handler->controller_ptr->SetStateEstimator(
+                    std::make_shared<
+                        estimator_utils::ExponentialSmoothingEstimator>());
+                global_handler->logger->info("Initialize State Estimator");
+              }
+              state_estimator_type = control_command.state_estimator_type;
+            }
 
-          global_handler->controller_ptr->ComputeGoal(current_state_info,
-                                                      goal_state_info);
-          switch (control_command.traj_interpolator_type) {
-          case TrajInterpolatorType::LINEAR_POSE:
-          case TrajInterpolatorType::LINEAR_POSITION:
-          case TrajInterpolatorType::MIN_JERK_POSE:
-            global_handler->traj_interpolator_ptr->Reset(
-                global_handler->time, current_state_info->pos_EE_in_base_frame,
-                current_state_info->quat_EE_in_base_frame,
-                goal_state_info->pos_EE_in_base_frame,
-                goal_state_info->quat_EE_in_base_frame, policy_rate, traj_rate,
-                global_handler->traj_interpolator_time_fraction);
-            break;
-          case TrajInterpolatorType::SMOOTH_JOINT_POSITION:
-          case TrajInterpolatorType::MIN_JERK_JOINT_POSITION:
-          case TrajInterpolatorType::LINEAR_JOINT_POSITION:
-            global_handler->traj_interpolator_ptr->Reset(
-                global_handler->time, current_state_info->joint_positions,
-                goal_state_info->joint_positions, policy_rate, traj_rate,
-                global_handler->traj_interpolator_time_fraction);
-            break;
-          case TrajInterpolatorType::COSINE_CARTESIAN_VELOCITY:
-          case TrajInterpolatorType::LINEAR_CARTESIAN_VELOCITY:
-            global_handler->traj_interpolator_ptr->Reset(
-                global_handler->time, current_state_info->twist_trans_EE_in_base_frame,
-                current_state_info->twist_rot_EE_in_base_frame,
-                goal_state_info->twist_trans_EE_in_base_frame,
-                goal_state_info->twist_rot_EE_in_base_frame, policy_rate, traj_rate,
-                global_handler->traj_interpolator_time_fraction);
-            break;
-          default:
-            break;
-          }
+            global_handler->start = true;
+            if (traj_interpolator_type !=
+                control_command.traj_interpolator_type) {
+              if (control_command.traj_interpolator_type ==
+                  TrajInterpolatorType::LINEAR_POSE) {
+                global_handler->traj_interpolator_ptr =
+                    std::make_shared<traj_utils::LinearPoseTrajInterpolator>();
+                global_handler->logger->info("Initialize Pose interpolator!");
+              } else if (control_command.traj_interpolator_type ==
+                         TrajInterpolatorType::LINEAR_POSITION) {
+                global_handler->traj_interpolator_ptr = std::make_shared<
+                    traj_utils::LinearPositionTrajInterpolator>();
+                global_handler->logger->info("Initialize Position interpolator!");
+              } else if (control_command.traj_interpolator_type ==
+                         TrajInterpolatorType::MIN_JERK_POSE) {
+                global_handler->traj_interpolator_ptr =
+                    std::make_shared<traj_utils::MinJerkPoseTrajInterpolator>();
+                global_handler->logger->info(
+                    "Initialize Min Jerk Pose interpolator!");
+              } else if (control_command.traj_interpolator_type ==
+                         TrajInterpolatorType::SMOOTH_JOINT_POSITION) {
+                global_handler->traj_interpolator_ptr =
+                    std::make_shared<traj_utils::SmoothJointTrajInterpolator>();
+                global_handler->logger->info(
+                    "Initialize Smooth Joint Trajectory Interpolator");
+              } else if (control_command.traj_interpolator_type ==
+                         TrajInterpolatorType::MIN_JERK_JOINT_POSITION) {
+                global_handler->traj_interpolator_ptr = std::make_shared<
+                    traj_utils::MinJerkJointPositionTrajInterpolator>();
+                global_handler->logger->info(
+                    "Initialize Min Jerk Joint Position Trajectory Interpolator");
+              } else if (control_command.traj_interpolator_type ==
+                         TrajInterpolatorType::LINEAR_JOINT_POSITION) {
+                global_handler->traj_interpolator_ptr = std::make_shared<
+                    traj_utils::LinearJointPositionTrajInterpolator>();
+                global_handler->logger->info(
+                    "Initialize Linear Joint Position Trajectory Interpolator");
+              } else if (control_command.traj_interpolator_type == TrajInterpolatorType::COSINE_CARTESIAN_VELOCITY) {
+                global_handler->traj_interpolator_ptr = std::make_shared<
+                    traj_utils::CosineCartesianVelocityTrajInterpolator>();
+                global_handler->logger->info(
+                    "Initialize Cosine Cartesian Velocity Trajectory Interpolator");
+              } else if (control_command.traj_interpolator_type == TrajInterpolatorType::LINEAR_CARTESIAN_VELOCITY) {
+                global_handler->traj_interpolator_ptr = std::make_shared<
+                    traj_utils::LinearCartesianVelocityTrajInterpolator>();
+                global_handler->logger->info(
+                    "Initialize Linear Cartesian Velocity Trajectory Interpolator");
+              }else {
+                global_handler->logger->error("No interpolator is specified");
+              }
+
+              traj_interpolator_type = control_command.traj_interpolator_type;
+            }
+
+            global_handler->controller_ptr->ParseMessage(control_msg);
+
+            global_handler->controller_ptr->ComputeGoal(current_state_info,
+                                                        goal_state_info);
+            switch (control_command.traj_interpolator_type) {
+            case TrajInterpolatorType::LINEAR_POSE:
+            case TrajInterpolatorType::LINEAR_POSITION:
+            case TrajInterpolatorType::MIN_JERK_POSE:
+              global_handler->traj_interpolator_ptr->Reset(
+                  global_handler->time, current_state_info->pos_EE_in_base_frame,
+                  current_state_info->quat_EE_in_base_frame,
+                  goal_state_info->pos_EE_in_base_frame,
+                  goal_state_info->quat_EE_in_base_frame, policy_rate, traj_rate,
+                  global_handler->traj_interpolator_time_fraction);
+              break;
+            case TrajInterpolatorType::SMOOTH_JOINT_POSITION:
+            case TrajInterpolatorType::MIN_JERK_JOINT_POSITION:
+            case TrajInterpolatorType::LINEAR_JOINT_POSITION:
+              global_handler->traj_interpolator_ptr->Reset(
+                  global_handler->time, current_state_info->joint_positions,
+                  goal_state_info->joint_positions, policy_rate, traj_rate,
+                  global_handler->traj_interpolator_time_fraction);
+              break;
+            case TrajInterpolatorType::COSINE_CARTESIAN_VELOCITY:
+            case TrajInterpolatorType::LINEAR_CARTESIAN_VELOCITY:
+              global_handler->traj_interpolator_ptr->Reset(
+                  global_handler->time, current_state_info->twist_trans_EE_in_base_frame,
+                  current_state_info->twist_rot_EE_in_base_frame,
+                  goal_state_info->twist_trans_EE_in_base_frame,
+                  goal_state_info->twist_rot_EE_in_base_frame, policy_rate, traj_rate,
+                  global_handler->traj_interpolator_time_fraction);
+              break;
+            default:
+              break;
+            }
           } else {
             // Failed to parse message - log and continue
             global_handler->logger->warn("Failed to parse control message");
