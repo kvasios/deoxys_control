@@ -24,9 +24,14 @@
 
 // Global signal handling for graceful shutdown
 std::atomic<bool> g_shutdown_requested{false};
+std::atomic<bool> g_signal_received{false};
 
 void signal_handler(int signum) {
-  spdlog::info("Received signal {}, initiating graceful shutdown...", signum);
+  // Only log once to avoid spam during gripper operations
+  bool expected = false;
+  if (g_signal_received.compare_exchange_strong(expected, true)) {
+    spdlog::info("Received signal {}, initiating graceful shutdown...", signum);
+  }
   g_shutdown_requested = true;
 }
 
@@ -104,6 +109,22 @@ int main(int argc, char **argv) {
       // Log information about current gripper control frequency
       gripper_logger->info("Gripper state publisher: {0}Hz", pub_rate);
       
+      // RAII thread cleanup helper - ensures threads are joined on exception
+      struct ThreadCleanup {
+        std::thread* thread_ptr;
+        std::atomic<bool>* running_flag;
+        
+        ThreadCleanup(std::thread* t, std::atomic<bool>* flag) 
+          : thread_ptr(t), running_flag(flag) {}
+        
+        ~ThreadCleanup() {
+          if (thread_ptr && thread_ptr->joinable()) {
+            *running_flag = false;
+            thread_ptr->join();
+          }
+        }
+      };
+      
       // Initialize gripper subscribing / publishing thread
       std::thread gripper_pub_thread([&]() {
         franka::GripperState current_gripper_state;
@@ -164,9 +185,20 @@ int main(int argc, char **argv) {
           }
         }
       });
+      
+      // Register thread cleanups - ensures proper shutdown on exception
+      ThreadCleanup pub_cleanup(&gripper_pub_thread, &running);
+      ThreadCleanup sub_cleanup(&gripper_sub_thread, &running);
 
-      gripper.homing();
-      gripper_logger->info("Gripper homing complete");
+      // Initial homing with exception handling
+      try {
+        gripper.homing();
+        gripper_logger->info("Gripper homing complete");
+      } catch (const franka::Exception& e) {
+        gripper_logger->warn("Gripper homing failed: {}. Will retry on next connection.", e.what());
+        throw; // Re-throw to trigger service restart
+      }
+      
       bool has_grasped = false;
       
       // Main loop
@@ -186,58 +218,70 @@ int main(int argc, char **argv) {
             continue;
           }
 
-          auto gripper_control = last_control_msg.control_msg();
-          if (gripper_control.UnpackTo(&homing_msg)) {
-            gripper.homing();
-            has_grasped = false;
-          } else if (gripper_control.UnpackTo(&move_msg)) {
-            gripper.move(move_msg.width(), move_msg.speed());
-            has_grasped = false;
-          } else if (gripper_control.UnpackTo(&grasp_msg)) {
-            if (has_grasped) {
-              std::this_thread::sleep_for(std::chrono::milliseconds(1));
-              continue;
-            }
-            double epsilon_inner, epsilon_outer;
-            if (grasp_msg.epsilon_inner() == 0. &&
-                grasp_msg.epsilon_outer() == 0.) {
-              // if not defined, we will keep epsilon high so that it won't get
-              // stuck
-              epsilon_inner = 0.08;
-              epsilon_outer = 0.08;
-            } else {
-              epsilon_inner = grasp_msg.epsilon_inner();
-              epsilon_outer = grasp_msg.epsilon_outer();
-            }
+          // Wrap gripper operations in try-catch to handle exceptions during execution
+          try {
+            auto gripper_control = last_control_msg.control_msg();
+            if (gripper_control.UnpackTo(&homing_msg)) {
+              gripper.homing();
+              has_grasped = false;
+            } else if (gripper_control.UnpackTo(&move_msg)) {
+              gripper.move(move_msg.width(), move_msg.speed());
+              has_grasped = false;
+            } else if (gripper_control.UnpackTo(&grasp_msg)) {
+              if (has_grasped) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+              }
+              double epsilon_inner, epsilon_outer;
+              if (grasp_msg.epsilon_inner() == 0. &&
+                  grasp_msg.epsilon_outer() == 0.) {
+                // if not defined, we will keep epsilon high so that it won't get
+                // stuck
+                epsilon_inner = 0.08;
+                epsilon_outer = 0.08;
+              } else {
+                epsilon_inner = grasp_msg.epsilon_inner();
+                epsilon_outer = grasp_msg.epsilon_outer();
+              }
 
-            double force;
-            if (grasp_msg.force() == 0.) {
-              force = 2.0;
-            } else {
-              force = grasp_msg.force();
-            }
-            has_grasped = gripper.grasp(grasp_msg.width(), grasp_msg.speed(),
-                                        force, epsilon_inner, epsilon_outer);
+              double force;
+              if (grasp_msg.force() == 0.) {
+                force = 2.0;
+              } else {
+                force = grasp_msg.force();
+              }
+              has_grasped = gripper.grasp(grasp_msg.width(), grasp_msg.speed(),
+                                          force, epsilon_inner, epsilon_outer);
 
-            gripper_logger->info("Grasped? {0}", has_grasped);
-          } else if (gripper_control.UnpackTo(&stop_msg)) {
-            gripper.stop();
+              gripper_logger->info("Grasped? {0}", has_grasped);
+            } else if (gripper_control.UnpackTo(&stop_msg)) {
+              gripper.stop();
+              has_grasped = false;
+            } else {
+              gripper_logger->warn("Unpack failed");
+            }
+          } catch (const franka::CommandException& e) {
+            // Gripper command error (e.g., motion aborted, invalid command)
+            // This is recoverable - log and continue service
+            gripper_logger->warn("Gripper command failed: {}. Continuing service...", e.what());
             has_grasped = false;
-          } else {
-            gripper_logger->warn("Unpack failed");
+          } catch (const franka::NetworkException& e) {
+            // Network error during gripper operation - needs service restart
+            gripper_logger->warn("Network error during gripper operation: {}", e.what());
+            throw; // Re-throw to trigger outer catch and service restart
+          } catch (const franka::Exception& e) {
+            // Other franka exceptions during gripper operation
+            gripper_logger->warn("Franka exception during gripper operation: {}. Continuing service...", e.what());
+            has_grasped = false;
           }
           executing = false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
       
-      // Signal threads to stop
+      // Signal threads to stop (ThreadCleanup RAII will handle actual cleanup)
       gripper_logger->info("Shutting down gripper threads...");
       running = false;
-      
-      // Wait for threads to finish
-      gripper_sub_thread.join();
-      gripper_pub_thread.join();
       
       // Clean exit - service ran successfully and terminated gracefully
       gripper_logger->info("Gripper control service terminated gracefully");

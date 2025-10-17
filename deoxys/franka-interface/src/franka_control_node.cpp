@@ -83,9 +83,14 @@ enum StateEstimatorType {
 
 // Global signal handling for graceful shutdown
 std::atomic<bool> g_shutdown_requested{false};
+std::atomic<bool> g_signal_received{false};
 
 void signal_handler(int signum) {
-  spdlog::info("Received signal {}, initiating graceful shutdown...", signum);
+  // Only log once to avoid spam during controller execution
+  bool expected = false;
+  if (g_signal_received.compare_exchange_strong(expected, true)) {
+    spdlog::info("Received signal {}, initiating graceful shutdown...", signum);
+  }
   g_shutdown_requested = true;
 }
 
@@ -341,6 +346,26 @@ int main(int argc, char **argv) {
           TrajInterpolatorType::NO_INTERPOLATION;
       StateEstimatorType state_estimator_type = StateEstimatorType::NO_ESTIMATOR;
 
+      // RAII thread cleanup helper - ensures threads are joined on exception
+      struct ThreadCleanup {
+        std::thread* thread_ptr;
+        std::atomic<bool>* termination_flag;
+        std::shared_ptr<robot_utils::StatePublisher> state_pub;
+        
+        ThreadCleanup(std::thread* t, std::atomic<bool>* flag, std::shared_ptr<robot_utils::StatePublisher> pub = nullptr) 
+          : thread_ptr(t), termination_flag(flag), state_pub(pub) {}
+        
+        ~ThreadCleanup() {
+          if (thread_ptr && thread_ptr->joinable()) {
+            *termination_flag = true;
+            if (state_pub) {
+              state_pub->StopPublishing();
+            }
+            thread_ptr->join();
+          }
+        }
+      };
+      
       // control message subscription thread
       std::thread control_msg_sub([&]() {
         while (!global_handler->termination && !g_shutdown_requested) {
@@ -548,6 +573,9 @@ int main(int argc, char **argv) {
           }
         }
       });
+      
+      // Register thread cleanup - ensures proper shutdown on exception
+      ThreadCleanup thread_cleanup(&control_msg_sub, &global_handler->termination, state_publisher);
 
       // Main loop
       global_handler->logger->info("Deoxys starting");
@@ -567,45 +595,76 @@ int main(int argc, char **argv) {
           state_publisher->UpdateNewState(init_state, &model);
           if (controller_type == ControllerType::NO_CONTROL)
             continue;
-          // Choose which control callback functions
-          if (controller_type == ControllerType::OSC_POSE ||
-              controller_type == ControllerType::OSC_POSITION ||
-              controller_type == ControllerType::OSC_YAW) {
-            // OSC control callback
-            robot.control(
-                control_callbacks::CreateTorqueFromCartesianSpaceCallback(
-                    global_handler, state_publisher, model, current_state_info,
-                    goal_state_info, policy_rate, traj_rate));
-          } else if (controller_type == ControllerType::JOINT_IMPEDANCE) {
-            // Joint Impedance control callback
-            global_handler->logger->info("Joint impedance callback");
-            robot.control(control_callbacks::CreateTorqueFromJointSpaceCallback(
-                global_handler, state_publisher, model, current_state_info,
-                goal_state_info, policy_rate, traj_rate));
-          } else if (controller_type == ControllerType::JOINT_POSITION) {
-            // Joint Position control callback
-            global_handler->logger->info("Joint position callback");
-            robot.control(control_callbacks::CreateJointPositionCallback(
-                global_handler, state_publisher, model, current_state_info,
-                goal_state_info, policy_rate, traj_rate));
-          } else if (controller_type == ControllerType::CARTESIAN_VELOCITY) {
-            // Cartesian Velocity control callback
-            global_handler->logger->info("Cartesian velocity callback");
-            robot.control(control_callbacks::CreateCartesianVelocitiesCallback(
-                global_handler, state_publisher, model, current_state_info,
-                goal_state_info, policy_rate, traj_rate));
+          
+          // Wrap robot.control() in try-catch to handle exceptions during execution
+          try {
+            // Choose which control callback functions
+            if (controller_type == ControllerType::OSC_POSE ||
+                controller_type == ControllerType::OSC_POSITION ||
+                controller_type == ControllerType::OSC_YAW) {
+              // OSC control callback
+              robot.control(
+                  control_callbacks::CreateTorqueFromCartesianSpaceCallback(
+                      global_handler, state_publisher, model, current_state_info,
+                      goal_state_info, policy_rate, traj_rate));
+            } else if (controller_type == ControllerType::JOINT_IMPEDANCE) {
+              // Joint Impedance control callback
+              global_handler->logger->info("Joint impedance callback");
+              robot.control(control_callbacks::CreateTorqueFromJointSpaceCallback(
+                  global_handler, state_publisher, model, current_state_info,
+                  goal_state_info, policy_rate, traj_rate));
+            } else if (controller_type == ControllerType::JOINT_POSITION) {
+              // Joint Position control callback
+              global_handler->logger->info("Joint position callback");
+              robot.control(control_callbacks::CreateJointPositionCallback(
+                  global_handler, state_publisher, model, current_state_info,
+                  goal_state_info, policy_rate, traj_rate));
+            } else if (controller_type == ControllerType::CARTESIAN_VELOCITY) {
+              // Cartesian Velocity control callback
+              global_handler->logger->info("Cartesian velocity callback");
+              robot.control(control_callbacks::CreateCartesianVelocitiesCallback(
+                  global_handler, state_publisher, model, current_state_info,
+                  goal_state_info, policy_rate, traj_rate));
+            }
+          } catch (const franka::ControlException& e) {
+            // Controller was stopped (e.g., "user stopped", motion aborted)
+            // This is recoverable - stop controller gracefully and continue service
+            global_handler->logger->warn("Controller stopped during execution: {}. Stopping controller gracefully...", e.what());
+            global_handler->running = false;
+            controller_type = ControllerType::NO_CONTROL;
+            
+            // Try to recover the robot state
+            try {
+              robot.automaticErrorRecovery();
+            } catch (const franka::Exception& recovery_error) {
+              global_handler->logger->warn("Error recovery failed: {}. Will retry connection.", recovery_error.what());
+              throw; // Re-throw to trigger outer catch and service restart
+            }
+          } catch (const franka::NetworkException& e) {
+            // Network error during control - this needs service restart
+            global_handler->logger->warn("Network error during controller execution: {}", e.what());
+            throw; // Re-throw to trigger outer catch and service restart
+          } catch (const franka::Exception& e) {
+            // Other franka exceptions during control
+            global_handler->logger->warn("Franka exception during controller execution: {}. Stopping controller gracefully...", e.what());
+            global_handler->running = false;
+            controller_type = ControllerType::NO_CONTROL;
+            
+            // Try to recover the robot state
+            try {
+              robot.automaticErrorRecovery();
+            } catch (const franka::Exception& recovery_error) {
+              global_handler->logger->warn("Error recovery failed: {}. Will retry connection.", recovery_error.what());
+              throw; // Re-throw to trigger outer catch and service restart
+            }
           }
         }
         global_handler->time = 0.0;
       }
       
-      // Signal threads to stop
+      // Signal threads to stop (ThreadCleanup RAII will handle actual cleanup)
       logger->info("Shutting down control threads...");
       global_handler->termination = true;
-      state_publisher->StopPublishing();
-
-      // Wait for threads to finish
-      control_msg_sub.join();
       
       // Clean exit - service ran successfully and terminated gracefully
       logger->info("Franka control service terminated gracefully");
