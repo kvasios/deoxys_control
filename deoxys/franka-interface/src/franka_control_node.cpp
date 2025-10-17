@@ -6,6 +6,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <csignal>
 
 #include <franka/exception.h>
 #include <franka/model.h>
@@ -79,6 +80,14 @@ enum StateEstimatorType {
   NO_ESTIMATOR,
   EXPONENTIAL_SMOOTHING_ESTIMATOR,
 };
+
+// Global signal handling for graceful shutdown
+std::atomic<bool> g_shutdown_requested{false};
+
+void signal_handler(int signum) {
+  spdlog::info("Received signal {}, initiating graceful shutdown...", signum);
+  g_shutdown_requested = true;
+}
 
 bool GetControllerType(const FrankaControlMessage &franka_control_msg,
                        ControllerType &controller_type) {
@@ -161,33 +170,35 @@ bool GetStateEstimatorType(const FrankaControlMessage franka_control_msg,
 }
 
 int main(int argc, char **argv) {
-  // Load cofigs
+  // Register signal handlers for graceful shutdown
+  std::signal(SIGINT, signal_handler);
+  std::signal(SIGTERM, signal_handler);
+  
+  // Load configs (outside retry loop - config errors are fatal)
   if (argc < 2) {
     spdlog::error("It seems that you forgot to specify a yaml config file");
-    return 0;
+    return 1;  // Fatal: missing required argument
   }
 
-  YAML::Node config = YAML::LoadFile(argv[1]);
+  YAML::Node config;
+  YAML::Node control_config;
+  try {
+    config = YAML::LoadFile(argv[1]);
+    if (argc > 2) {
+      control_config = YAML::LoadFile(argv[2]);
+    } else {
+      control_config = YAML::LoadFile("config/control_config.yml");
+    }
+  } catch (const YAML::Exception& e) {
+    spdlog::error("Fatal config error: {}", e.what());
+    return 1;  // Fatal: bad config
+  }
 
-  // Initialize zmq sub / pub
+  // Extract configuration parameters
   const std::string robot_ip = config["ROBOT"]["IP"].as<std::string>();
-
-  // Subscribing control command
   const std::string subscriber_ip = config["PC"]["IP"].as<std::string>();
   const std::string sub_port = config["NUC"]["SUB_PORT"].as<std::string>();
-
-  // Publishing control command
   const std::string pub_port = config["NUC"]["PUB_PORT"].as<std::string>();
-
-  // zmq_utils::ZMQPublisher zmq_pub(pub_port);
-  zmq_utils::ZMQSubscriber zmq_sub(subscriber_ip, sub_port);
-
-  YAML::Node control_config;
-  if (argc > 2) {
-    control_config = YAML::LoadFile(argv[2]);
-  } else {
-    control_config = YAML::LoadFile("config/control_config.yml");
-  }
 
   int loaded_state_pub_rate, loaded_policy_rate, loaded_traj_rate;
   bool zmq_noblock;
@@ -216,7 +227,7 @@ int main(int argc, char **argv) {
   const int policy_rate = loaded_policy_rate;
   const int traj_rate = loaded_traj_rate;
 
-  // Initialize robot
+  // Initialize logger (outside retry loop - logger is needed for error reporting)
   log_utils::initialize_logger(
       config["ARM_LOGGER"]["CONSOLE"]["LOGGER_NAME"].as<std::string>(),
       config["ARM_LOGGER"]["CONSOLE"]["LEVEL"].as<std::string>(),
@@ -224,121 +235,133 @@ int main(int argc, char **argv) {
       config["ARM_LOGGER"]["FILE"]["LOGGER_NAME"].as<std::string>(),
       config["ARM_LOGGER"]["FILE"]["LEVEL"].as<std::string>(),
       config["ARM_LOGGER"]["FILE"]["USE"].as<bool>());
+  
+  auto logger = log_utils::get_logger(
+      config["ARM_LOGGER"]["CONSOLE"]["LOGGER_NAME"].as<std::string>());
 
-  try {
+  // Service retry loop with exponential backoff
+  int consecutive_failures = 0;
+  const int max_backoff_seconds = 30;
+  
+  while (!g_shutdown_requested) {
+    try {
+      logger->info("Franka control service starting (attempt {})", 
+                   consecutive_failures + 1);
+      
+      // Initialize ZMQ communication
+      zmq_utils::ZMQSubscriber zmq_sub(subscriber_ip, sub_port);
 
-    franka::Robot robot(robot_ip);
-    robot.automaticErrorRecovery();
-    setDefaultBehavior(robot);
-    franka::Model model = robot.loadModel();
+      franka::Robot robot(robot_ip);
+      robot.automaticErrorRecovery();
+      setDefaultBehavior(robot);
+      franka::Model model = robot.loadModel();
 
-    // TODO(Yifeng): Read this config from yaml file
-    robot.setCollisionBehavior(
-        {{100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0}},
-        {{100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0}},
-        {{100.0, 100.0, 100.0, 100.0, 100.0, 100.0}},
-        {{100.0, 100.0, 100.0, 100.0, 100.0, 100.0}});
+      // TODO(Yifeng): Read this config from yaml file
+      robot.setCollisionBehavior(
+          {{100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0}},
+          {{100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0}},
+          {{100.0, 100.0, 100.0, 100.0, 100.0, 100.0}},
+          {{100.0, 100.0, 100.0, 100.0, 100.0, 100.0}});
 
-    // Get initial state
-    franka::RobotState init_state = robot.readOnce();
-    Eigen::Affine3d init_T_EE_in_base_frame(
-        Eigen::Matrix4d::Map(init_state.O_T_EE.data()));
+      // Get initial state
+      franka::RobotState init_state = robot.readOnce();
+      Eigen::Affine3d init_T_EE_in_base_frame(
+          Eigen::Matrix4d::Map(init_state.O_T_EE.data()));
 
-    std::shared_ptr<SharedMemory> global_handler =
-        std::make_shared<SharedMemory>();
-    global_handler->logger = log_utils::get_logger(
-        config["ARM_LOGGER"]["CONSOLE"]["LOGGER_NAME"].as<std::string>());
-    
-    // Read torque limits from the global config
-    global_handler->max_torque =
-        control_config["CONTROL"]["SAFETY"]["MAX_TORQUE"].as<double>();
-    global_handler->min_torque =
-        control_config["CONTROL"]["SAFETY"]["MIN_TORQUE"].as<double>();
+      std::shared_ptr<SharedMemory> global_handler =
+          std::make_shared<SharedMemory>();
+      global_handler->logger = logger;
+      
+      // Read torque limits from the global config
+      global_handler->max_torque =
+          control_config["CONTROL"]["SAFETY"]["MAX_TORQUE"].as<double>();
+      global_handler->min_torque =
+          control_config["CONTROL"]["SAFETY"]["MIN_TORQUE"].as<double>();
 
-    // Read speed limits from the global config
-    global_handler->max_trans_speed =
-        control_config["CONTROL"]["SAFETY"]["MAX_TRANS_SPEED"].as<double>();
-    global_handler->min_trans_speed =
-        control_config["CONTROL"]["SAFETY"]["MIN_TRANS_SPEED"].as<double>();
-    global_handler->max_rot_speed =
-        control_config["CONTROL"]["SAFETY"]["MAX_ROT_SPEED"].as<double>();
-    global_handler->min_rot_speed =
-        control_config["CONTROL"]["SAFETY"]["MIN_ROT_SPEED"].as<double>();
+      // Read speed limits from the global config
+      global_handler->max_trans_speed =
+          control_config["CONTROL"]["SAFETY"]["MAX_TRANS_SPEED"].as<double>();
+      global_handler->min_trans_speed =
+          control_config["CONTROL"]["SAFETY"]["MIN_TRANS_SPEED"].as<double>();
+      global_handler->max_rot_speed =
+          control_config["CONTROL"]["SAFETY"]["MAX_ROT_SPEED"].as<double>();
+      global_handler->min_rot_speed =
+          control_config["CONTROL"]["SAFETY"]["MIN_ROT_SPEED"].as<double>();
 
-    std::shared_ptr<StateInfo> current_state_info =
-        std::make_shared<StateInfo>();
-    std::shared_ptr<StateInfo> goal_state_info = std::make_shared<StateInfo>();
+      std::shared_ptr<StateInfo> current_state_info =
+          std::make_shared<StateInfo>();
+      std::shared_ptr<StateInfo> goal_state_info = std::make_shared<StateInfo>();
 
-    current_state_info->pos_EE_in_base_frame
-        << init_T_EE_in_base_frame.translation();
-    current_state_info->quat_EE_in_base_frame =
-        Eigen::Quaterniond(init_T_EE_in_base_frame.linear());
-    goal_state_info->pos_EE_in_base_frame =
-        current_state_info->pos_EE_in_base_frame;
-    goal_state_info->quat_EE_in_base_frame =
-        current_state_info->quat_EE_in_base_frame;
-    current_state_info->joint_positions =
-        Eigen::VectorXd::Map(init_state.q_d.data(), 7);
-    goal_state_info->joint_positions = current_state_info->joint_positions;
+      current_state_info->pos_EE_in_base_frame
+          << init_T_EE_in_base_frame.translation();
+      current_state_info->quat_EE_in_base_frame =
+          Eigen::Quaterniond(init_T_EE_in_base_frame.linear());
+      goal_state_info->pos_EE_in_base_frame =
+          current_state_info->pos_EE_in_base_frame;
+      goal_state_info->quat_EE_in_base_frame =
+          current_state_info->quat_EE_in_base_frame;
+      current_state_info->joint_positions =
+          Eigen::VectorXd::Map(init_state.q_d.data(), 7);
+      goal_state_info->joint_positions = current_state_info->joint_positions;
 
-    // Log information about current arm control frequency
-    global_handler->logger->info(
-        "State Publisher: {0}Hz, Policy: {1}Hz, Traj Interpolation {2}Hz, ZMQ "
-        "noblock receving {3}",
-        state_pub_rate, policy_rate, traj_rate, zmq_noblock);
-    if (!zmq_noblock) {
-      global_handler->logger->warn(
-          "ZMQ communication is blocking, it could lead to severe networking "
-          "issue. Recommend to set true.");
-    }
+      // Log information about current arm control frequency
+      global_handler->logger->info(
+          "State Publisher: {0}Hz, Policy: {1}Hz, Traj Interpolation {2}Hz, ZMQ "
+          "noblock receving {3}",
+          state_pub_rate, policy_rate, traj_rate, zmq_noblock);
+      if (!zmq_noblock) {
+        global_handler->logger->warn(
+            "ZMQ communication is blocking, it could lead to severe networking "
+            "issue. Recommend to set true.");
+      }
 
-    struct {
-      std::mutex mutex;
-      FrankaControlMessage control_msg;
+      struct {
+        std::mutex mutex;
+        FrankaControlMessage control_msg;
+        ControllerType controller_type = ControllerType::NO_CONTROL;
+        TrajInterpolatorType traj_interpolator_type =
+            TrajInterpolatorType::NO_INTERPOLATION;
+        StateEstimatorType state_estimator_type =
+            StateEstimatorType::NO_ESTIMATOR;
+        double timeout = -1.0; // No timeout if negative
+      } control_command{};
+
+      struct {
+        std::mutex mutex;
+        franka::RobotState state;
+      } state_sub{};
+
+      std::shared_ptr<robot_utils::StatePublisher> state_publisher =
+          std::make_shared<robot_utils::StatePublisher>(pub_port, state_pub_rate);
+      state_publisher->StartPublishing();
+      state_publisher->UpdateNewState(init_state, &model);
+
       ControllerType controller_type = ControllerType::NO_CONTROL;
       TrajInterpolatorType traj_interpolator_type =
           TrajInterpolatorType::NO_INTERPOLATION;
-      StateEstimatorType state_estimator_type =
-          StateEstimatorType::NO_ESTIMATOR;
-      double timeout = -1.0; // No timeout if negative
-    } control_command{};
+      StateEstimatorType state_estimator_type = StateEstimatorType::NO_ESTIMATOR;
 
-    struct {
-      std::mutex mutex;
-      franka::RobotState state;
-    } state_sub{};
+      // control message subscription thread
+      std::thread control_msg_sub([&]() {
+        while (!global_handler->termination && !g_shutdown_requested) {
+          std::this_thread::sleep_for(
+              std::chrono::milliseconds(int(1. / policy_rate * 1000.)));
 
-    std::shared_ptr<robot_utils::StatePublisher> state_publisher =
-        std::make_shared<robot_utils::StatePublisher>(pub_port, state_pub_rate);
-    state_publisher->StartPublishing();
-    state_publisher->UpdateNewState(init_state, &model);
-
-    ControllerType controller_type = ControllerType::NO_CONTROL;
-    TrajInterpolatorType traj_interpolator_type =
-        TrajInterpolatorType::NO_INTERPOLATION;
-    StateEstimatorType state_estimator_type = StateEstimatorType::NO_ESTIMATOR;
-
-    // control message subscription thread
-    std::thread control_msg_sub([&]() {
-      while (!global_handler->termination) {
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(int(1. / policy_rate * 1000.)));
-
-        // Receive message
-        std::string msg;
-        msg = zmq_sub.recv(zmq_noblock);
-        if (msg.length() == 0) {
-          global_handler->no_msg_counter += int(global_handler->start);
-          global_handler->logger->debug("Counter {0}",
-                                        global_handler->no_msg_counter);
-          if (global_handler->no_msg_counter >= 20) {
-            global_handler->running = false;
-            global_handler->termination = true;
-            global_handler->logger->debug(
-                "No valid messages received in 20 steps");
+          // Receive message
+          std::string msg;
+          msg = zmq_sub.recv(zmq_noblock);
+          if (msg.length() == 0) {
+            global_handler->no_msg_counter += int(global_handler->start);
+            global_handler->logger->debug("Counter {0}",
+                                          global_handler->no_msg_counter);
+            if (global_handler->no_msg_counter >= 20) {
+              global_handler->running = false;
+              global_handler->termination = true;
+              global_handler->logger->debug(
+                  "No valid messages received in 20 steps");
+            }
+            continue;
           }
-          continue;
-        }
 
         FrankaControlMessage control_msg;
 
@@ -531,66 +554,123 @@ int main(int argc, char **argv) {
           global_handler->logger->info("Counter {0}",
                                        global_handler->no_msg_counter);
         }
-      }
-    });
-
-    // Main loop
-    global_handler->logger->info("Deoxys starting");
-    while (!global_handler->termination) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      // If controller_type changes, exit robot control loop and reinitialize.
-      FrankaControlMessage control_msg;
-
-      if (control_command.mutex.try_lock()) {
-        controller_type = control_command.controller_type;
-        control_msg = control_command.control_msg;
-        control_command.mutex.unlock();
-      }
-
-      if (global_handler->running) {
-        init_state = robot.readOnce();
-        state_publisher->UpdateNewState(init_state, &model);
-        if (controller_type == ControllerType::NO_CONTROL)
-          continue;
-        // Choose which control callback functions
-        if (controller_type == ControllerType::OSC_POSE ||
-            controller_type == ControllerType::OSC_POSITION ||
-            controller_type == ControllerType::OSC_YAW) {
-          // OSC control callback
-          robot.control(
-              control_callbacks::CreateTorqueFromCartesianSpaceCallback(
-                  global_handler, state_publisher, model, current_state_info,
-                  goal_state_info, policy_rate, traj_rate));
-        } else if (controller_type == ControllerType::JOINT_IMPEDANCE) {
-          // Joint Impedance control callback
-          global_handler->logger->info("Joint impedance callback");
-          robot.control(control_callbacks::CreateTorqueFromJointSpaceCallback(
-              global_handler, state_publisher, model, current_state_info,
-              goal_state_info, policy_rate, traj_rate));
-        } else if (controller_type == ControllerType::JOINT_POSITION) {
-          // Joint Position control callback
-          global_handler->logger->info("Joint position callback");
-          robot.control(control_callbacks::CreateJointPositionCallback(
-              global_handler, state_publisher, model, current_state_info,
-              goal_state_info, policy_rate, traj_rate));
-        } else if (controller_type == ControllerType::CARTESIAN_VELOCITY) {
-          // Cartesian Velocity control callback
-          global_handler->logger->info("Cartesian velocity callback");
-          robot.control(control_callbacks::CreateCartesianVelocitiesCallback(
-              global_handler, state_publisher, model, current_state_info,
-              goal_state_info, policy_rate, traj_rate));
         }
-      }
-      global_handler->time = 0.0;
-    }
-    state_publisher->StopPublishing();
+      });
 
-    control_msg_sub.join();
-  } catch (franka::Exception const &e) {
-    auto logger = log_utils::get_logger(
-        config["ARM_LOGGER"]["CONSOLE"]["LOGGER_NAME"].as<std::string>());
-    logger->error(e.what());
-    return -1;
+      // Main loop
+      global_handler->logger->info("Deoxys starting");
+      while (!global_handler->termination && !g_shutdown_requested) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // If controller_type changes, exit robot control loop and reinitialize.
+        FrankaControlMessage control_msg;
+
+        if (control_command.mutex.try_lock()) {
+          controller_type = control_command.controller_type;
+          control_msg = control_command.control_msg;
+          control_command.mutex.unlock();
+        }
+
+        if (global_handler->running) {
+          init_state = robot.readOnce();
+          state_publisher->UpdateNewState(init_state, &model);
+          if (controller_type == ControllerType::NO_CONTROL)
+            continue;
+          // Choose which control callback functions
+          if (controller_type == ControllerType::OSC_POSE ||
+              controller_type == ControllerType::OSC_POSITION ||
+              controller_type == ControllerType::OSC_YAW) {
+            // OSC control callback
+            robot.control(
+                control_callbacks::CreateTorqueFromCartesianSpaceCallback(
+                    global_handler, state_publisher, model, current_state_info,
+                    goal_state_info, policy_rate, traj_rate));
+          } else if (controller_type == ControllerType::JOINT_IMPEDANCE) {
+            // Joint Impedance control callback
+            global_handler->logger->info("Joint impedance callback");
+            robot.control(control_callbacks::CreateTorqueFromJointSpaceCallback(
+                global_handler, state_publisher, model, current_state_info,
+                goal_state_info, policy_rate, traj_rate));
+          } else if (controller_type == ControllerType::JOINT_POSITION) {
+            // Joint Position control callback
+            global_handler->logger->info("Joint position callback");
+            robot.control(control_callbacks::CreateJointPositionCallback(
+                global_handler, state_publisher, model, current_state_info,
+                goal_state_info, policy_rate, traj_rate));
+          } else if (controller_type == ControllerType::CARTESIAN_VELOCITY) {
+            // Cartesian Velocity control callback
+            global_handler->logger->info("Cartesian velocity callback");
+            robot.control(control_callbacks::CreateCartesianVelocitiesCallback(
+                global_handler, state_publisher, model, current_state_info,
+                goal_state_info, policy_rate, traj_rate));
+          }
+        }
+        global_handler->time = 0.0;
+      }
+      state_publisher->StopPublishing();
+
+      control_msg_sub.join();
+      
+      // Clean exit - service ran successfully and terminated gracefully
+      logger->info("Franka control service terminated gracefully");
+      consecutive_failures = 0;
+      break;
+      
+    } catch (const franka::NetworkException& e) {
+      // Transient network error - retry with exponential backoff
+      consecutive_failures++;
+      int backoff_seconds = std::min(max_backoff_seconds, consecutive_failures * 2);
+      logger->warn("Network error (attempt {}): {}. Retrying in {}s...", 
+                   consecutive_failures, e.what(), backoff_seconds);
+      std::this_thread::sleep_for(std::chrono::seconds(backoff_seconds));
+      
+    } catch (const franka::CommandException& e) {
+      // Command error - might be recoverable (e.g., motion stopped)
+      consecutive_failures++;
+      int backoff_seconds = std::min(max_backoff_seconds, consecutive_failures * 2);
+      logger->warn("Command error (attempt {}): {}. Retrying in {}s...", 
+                   consecutive_failures, e.what(), backoff_seconds);
+      std::this_thread::sleep_for(std::chrono::seconds(backoff_seconds));
+      
+    } catch (const franka::ControlException& e) {
+      // Control error - might be recoverable after robot state reset
+      consecutive_failures++;
+      int backoff_seconds = std::min(max_backoff_seconds, consecutive_failures * 2);
+      logger->warn("Control error (attempt {}): {}. Retrying in {}s...", 
+                   consecutive_failures, e.what(), backoff_seconds);
+      std::this_thread::sleep_for(std::chrono::seconds(backoff_seconds));
+      
+    } catch (const franka::IncompatibleVersionException& e) {
+      // Fatal: version mismatch
+      logger->error("Fatal: Incompatible libfranka version: {}", e.what());
+      return 1;
+      
+    } catch (const franka::Exception& e) {
+      // Other franka errors - try limited retries
+      consecutive_failures++;
+      if (consecutive_failures > 5) {
+        logger->error("Fatal: Too many consecutive Franka errors: {}", e.what());
+        return 1;
+      }
+      int backoff_seconds = std::min(max_backoff_seconds, consecutive_failures * 2);
+      logger->warn("Franka error (attempt {}): {}. Retrying in {}s...", 
+                   consecutive_failures, e.what(), backoff_seconds);
+      std::this_thread::sleep_for(std::chrono::seconds(backoff_seconds));
+      
+    } catch (const std::exception& e) {
+      // Unexpected error - try limited retries
+      consecutive_failures++;
+      if (consecutive_failures > 3) {
+        logger->error("Fatal: Unexpected error after {} attempts: {}", 
+                      consecutive_failures, e.what());
+        return 1;
+      }
+      int backoff_seconds = std::min(max_backoff_seconds, consecutive_failures * 3);
+      logger->error("Unexpected error (attempt {}): {}. Retrying in {}s...", 
+                    consecutive_failures, e.what(), backoff_seconds);
+      std::this_thread::sleep_for(std::chrono::seconds(backoff_seconds));
+    }
   }
+  
+  logger->info("Franka control service shutting down");
   return 0;
 }
