@@ -131,7 +131,15 @@ int main(int argc, char **argv) {
         bool new_control_msg = false;
         while (running && !g_shutdown_requested) {
           std::string msg;
-          msg = zmq_sub.recv(false);
+          msg = zmq_sub.recv(true);  // Non-blocking receive for responsive shutdown
+          
+          if (msg.length() == 0) {
+            // No message available - this is normal
+            // Service stays alive and waits for messages
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+          }
+          
           FrankaGripperControlMessage control_msg;
           if (control_msg.ParseFromString(msg)) {
             new_control_msg = true;
@@ -139,20 +147,21 @@ int main(int argc, char **argv) {
               gripper_cmd.control_msg = control_msg;
               gripper_cmd.mutex.unlock();
             }
-          }
-          auto gripper_control = control_msg.control_msg();
-          FrankaGripperStopMessage stop_msg;
-          if (gripper_control.UnpackTo(&stop_msg)) {
-            gripper.stop();
-          }
+            
+            auto gripper_control = control_msg.control_msg();
+            FrankaGripperStopMessage stop_msg;
+            if (gripper_control.UnpackTo(&stop_msg)) {
+              gripper.stop();
+            }
 
-          // Decide if terminate or not
-          if (control_msg.termination()) {
-            running = false;
-          } else {
-            executing = true;
+            // Decide if terminate or not
+            if (control_msg.termination()) {
+              running = false;
+              gripper_logger->info("Received explicit termination command from client");
+            } else {
+              executing = true;
+            }
           }
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
       });
 
@@ -173,6 +182,7 @@ int main(int argc, char **argv) {
             last_control_msg = gripper_cmd.control_msg;
             gripper_cmd.mutex.unlock();
           } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
           }
 
@@ -185,6 +195,7 @@ int main(int argc, char **argv) {
             has_grasped = false;
           } else if (gripper_control.UnpackTo(&grasp_msg)) {
             if (has_grasped) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(1));
               continue;
             }
             double epsilon_inner, epsilon_outer;
@@ -217,7 +228,14 @@ int main(int argc, char **argv) {
           }
           executing = false;
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
+      
+      // Signal threads to stop
+      gripper_logger->info("Shutting down gripper threads...");
+      running = false;
+      
+      // Wait for threads to finish
       gripper_sub_thread.join();
       gripper_pub_thread.join();
       

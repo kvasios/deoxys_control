@@ -351,25 +351,19 @@ int main(int argc, char **argv) {
           std::string msg;
           msg = zmq_sub.recv(zmq_noblock);
           if (msg.length() == 0) {
-            global_handler->no_msg_counter += int(global_handler->start);
-            global_handler->logger->debug("Counter {0}",
-                                          global_handler->no_msg_counter);
-            if (global_handler->no_msg_counter >= 20) {
-              global_handler->running = false;
-              global_handler->termination = true;
-              global_handler->logger->debug(
-                  "No valid messages received in 20 steps");
-            }
+            // No message available - this is normal for non-blocking receive
+            // Service stays alive and waits for messages
             continue;
           }
 
-        FrankaControlMessage control_msg;
+          FrankaControlMessage control_msg;
 
-        if (control_msg.ParseFromString(msg)) {
-          global_handler->no_msg_counter = 0;
-          if (control_msg.termination()) {
-            global_handler->running = false;
-            global_handler->termination = true;
+          if (control_msg.ParseFromString(msg)) {
+            if (control_msg.termination()) {
+              global_handler->running = false;
+              global_handler->termination = true;
+              global_handler->logger->info("Received explicit termination command from client");
+            }
           }
           // Determine controller message type
           if (control_command.mutex.try_lock()) {
@@ -549,11 +543,10 @@ int main(int argc, char **argv) {
           default:
             break;
           }
-        } else {
-          global_handler->no_msg_counter++;
-          global_handler->logger->info("Counter {0}",
-                                       global_handler->no_msg_counter);
-        }
+          } else {
+            // Failed to parse message - log and continue
+            global_handler->logger->warn("Failed to parse control message");
+          }
         }
       });
 
@@ -606,8 +599,13 @@ int main(int argc, char **argv) {
         }
         global_handler->time = 0.0;
       }
+      
+      // Signal threads to stop
+      logger->info("Shutting down control threads...");
+      global_handler->termination = true;
       state_publisher->StopPublishing();
 
+      // Wait for threads to finish
       control_msg_sub.join();
       
       // Clean exit - service ran successfully and terminated gracefully
