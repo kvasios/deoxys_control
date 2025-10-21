@@ -132,12 +132,15 @@ class FrankaInterface:
         self.counter = 0
         self.termination = False
 
+        # Thread control: use Event for clean shutdown
+        self._stop_threads = threading.Event()
+        
         self._state_sub_thread = threading.Thread(target=self.get_state)
-        self._state_sub_thread.daemon = True
+        self._state_sub_thread.daemon = False  # Non-daemon for proper cleanup
         self._state_sub_thread.start()
 
         self._gripper_sub_thread = threading.Thread(target=self.get_gripper_state)
-        self._gripper_sub_thread.daemon = True
+        self._gripper_sub_thread.daemon = False  # Non-daemon for proper cleanup
         self._gripper_sub_thread.start()
 
         self.last_time = None
@@ -161,27 +164,35 @@ class FrankaInterface:
         self.automatic_gripper_reset = automatic_gripper_reset
 
     def get_state(self, no_block: bool = False):
-        """_summary_
+        """Thread function to continuously receive robot state messages.
 
         Args:
             no_block (bool, optional): Decide if zmq receives messages synchronously or asynchronously. Defaults to False.
         """
-        if no_block:
-            recv_kwargs = {"flags": zmq.NOBLOCK}
-        else:
-            recv_kwargs = {}
-        while True:
+        # Always use non-blocking for responsive shutdown
+        self._subscriber.setsockopt(zmq.RCVTIMEO, 100)  # 100ms timeout
+        
+        while not self._stop_threads.is_set():
             try:
                 franka_robot_state = franka_robot_state_pb2.FrankaRobotStateMessage()
-                # message = self._subscriber.recv(flags=zmq.NOBLOCK)
-                message = self._subscriber.recv(**recv_kwargs)
+                message = self._subscriber.recv()
                 franka_robot_state.ParseFromString(message)
                 self._state_buffer.append(franka_robot_state)
-            except:
-                pass
+            except zmq.Again:
+                # Timeout - check stop flag and continue
+                continue
+            except Exception as e:
+                # Only log if not shutting down
+                if not self._stop_threads.is_set():
+                    logger.debug(f"State recv error: {e}")
+                break
 
     def get_gripper_state(self):
-        while True:
+        """Thread function to continuously receive gripper state messages."""
+        # Set timeout for responsive shutdown
+        self._gripper_subscriber.setsockopt(zmq.RCVTIMEO, 100)  # 100ms timeout
+        
+        while not self._stop_threads.is_set():
             try:
                 franka_gripper_state = (
                     franka_robot_state_pb2.FrankaGripperStateMessage()
@@ -189,8 +200,14 @@ class FrankaInterface:
                 message = self._gripper_subscriber.recv()
                 franka_gripper_state.ParseFromString(message)
                 self._gripper_state_buffer.append(franka_gripper_state)
-            except:
-                pass
+            except zmq.Again:
+                # Timeout - check stop flag and continue
+                continue
+            except Exception as e:
+                # Only log if not shutting down
+                if not self._stop_threads.is_set():
+                    logger.debug(f"Gripper state recv error: {e}")
+                break
 
     def preprocess(self):
 
@@ -524,7 +541,39 @@ class FrankaInterface:
         self.last_gripper_action = action
 
     def close(self):
-        self._state_sub_thread.join(1.0)
+        """Gracefully shutdown the interface and clean up resources."""
+        logger.info("Shutting down FrankaInterface...")
+        
+        # Signal threads to stop
+        self._stop_threads.set()
+        
+        # Wait for threads to finish (with timeout)
+        if self._state_sub_thread.is_alive():
+            self._state_sub_thread.join(timeout=2.0)
+            if self._state_sub_thread.is_alive():
+                logger.warning("State thread did not terminate in time")
+        
+        if self._gripper_sub_thread.is_alive():
+            self._gripper_sub_thread.join(timeout=2.0)
+            if self._gripper_sub_thread.is_alive():
+                logger.warning("Gripper thread did not terminate in time")
+        
+        # Close ZMQ sockets gracefully
+        try:
+            self._publisher.close()
+            self._subscriber.close()
+            self._gripper_publisher.close()
+            self._gripper_subscriber.close()
+        except Exception as e:
+            logger.debug(f"Error closing sockets: {e}")
+        
+        # Terminate ZMQ context
+        try:
+            self._context.term()
+        except Exception as e:
+            logger.debug(f"Error terminating context: {e}")
+        
+        logger.info("FrankaInterface shutdown complete")
 
     @property
     def last_eef_pose(self) -> np.ndarray:

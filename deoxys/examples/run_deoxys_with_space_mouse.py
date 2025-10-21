@@ -55,7 +55,11 @@ def main():
         termination=True,
     )
 
+    # Properly cleanup all resources
+    logger.info("Cleaning up resources...")
     robot_interface.close()
+    device.close()
+    logger.info("Cleanup complete")
 
     # Check if there is any state frame missing
     for (state, next_state) in zip(

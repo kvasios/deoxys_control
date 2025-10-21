@@ -136,9 +136,15 @@ class SpaceMouse:
         self.rotation = np.array([[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]])
         self._enabled = False
 
+        # Thread control: use Event for clean shutdown
+        self._stop_thread = threading.Event()
+        
+        # Set device to non-blocking mode for responsive shutdown
+        self.device.set_nonblocking(1)
+        
         # launch a new listener thread to listen to SpaceMouse
         self.thread = threading.Thread(target=self.run)
-        self.thread.daemon = True
+        self.thread.daemon = False  # Non-daemon for proper cleanup
         self.thread.start()
 
     @staticmethod
@@ -215,8 +221,15 @@ class SpaceMouse:
 
         t_last_click = -1
 
-        while True:
-            d = self.device.read(64)  # Read up to 64 bytes to accommodate different models
+        while not self._stop_thread.is_set():
+            try:
+                d = self.device.read(64)  # Non-blocking read
+            except Exception as e:
+                # Device error - exit thread
+                if not self._stop_thread.is_set():
+                    print(f"SpaceMouse read error: {e}")
+                break
+                
             if d is not None and self._enabled and len(d) > 0:
 
                 # Handle different packet formats for different SpaceMouse models
@@ -275,6 +288,31 @@ class SpaceMouse:
                         self._reset_state = 1
                         self._enabled = False
                         self._reset_internal_state()
+            
+            # Small sleep to prevent busy-waiting when no data available
+            if d is None or len(d) == 0:
+                time.sleep(0.001)
+
+    def close(self):
+        """Gracefully shutdown the SpaceMouse thread and close device."""
+        print("Shutting down SpaceMouse...")
+        
+        # Signal thread to stop
+        self._stop_thread.set()
+        
+        # Wait for thread to finish
+        if self.thread.is_alive():
+            self.thread.join(timeout=2.0)
+            if self.thread.is_alive():
+                print("Warning: SpaceMouse thread did not terminate in time")
+        
+        # Close HID device
+        try:
+            self.device.close()
+        except Exception as e:
+            print(f"Error closing SpaceMouse device: {e}")
+        
+        print("SpaceMouse shutdown complete")
 
     @property
     def control(self):
