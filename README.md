@@ -173,23 +173,114 @@ export PYTHONPATH="${PWD}:${PYTHONPATH}"
 python -c "import deoxys; print('Deoxys installed successfully')"
 ```
 
+## SpaceMouse Setup
+
+If you plan to use a SpaceMouse for teleoperation, you need to set it up before running the examples. This setup is required on Linux to allow non-root access to the SpaceMouse device.
+
+### Step 1: Install hidapi
+
+Install the `hidapi` Python package in your environment:
+
+```bash
+pip install hidapi
+```
+
+### Step 2: Find your SpaceMouse USB IDs
+
+First, identify the actual vendor and product IDs on your machine (VID is always `256f` for 3Dconnexion; PID varies by model/firmware):
+
+**Using lsusb:**
+```bash
+lsusb | grep -i 256f
+# Example output: 256f:c635 3Dconnexion SpaceMouse Compact
+```
+
+**Using Python (after installing hidapi):**
+```python
+import hid
+print([(hex(d['vendor_id']), hex(d['product_id']), d.get('product_string')) 
+       for d in hid.enumerate() if d.get('vendor_id') == 0x256f])
+```
+
+### Step 3: Create udev rules
+
+Create a udev rule file to allow non-root access to your SpaceMouse device. Replace `<PID>` with your product ID from Step 2.
+
+**Generic rule (replace `<PID>` with your product ID):**
+```bash
+printf '%s\n' \
+'KERNEL=="hidraw*", ATTRS{idVendor}=="256f", ATTRS{idProduct}=="<PID>", MODE="0666", GROUP="plugdev", TAG+="uaccess"' \
+'SUBSYSTEM=="usb",   ATTRS{idVendor}=="256f", ATTRS{idProduct}=="<PID>", MODE="0666", GROUP="plugdev", TAG+="uaccess"' | \
+sudo tee /etc/udev/rules.d/60-spacemouse.rules
+```
+
+**Example for SpaceMouse Compact (PID: c635):**
+```bash
+printf '%s\n' \
+'KERNEL=="hidraw*", ATTRS{idVendor}=="256f", ATTRS{idProduct}=="c635", MODE="0666", GROUP="plugdev", TAG+="uaccess"' \
+'SUBSYSTEM=="usb",   ATTRS{idVendor}=="256f", ATTRS{idProduct}=="c635", MODE="0666", GROUP="plugdev", TAG+="uaccess"' | \
+sudo tee /etc/udev/rules.d/60-spacemouse.rules
+```
+
+### Step 4: Reload udev rules and replug device
+
+```bash
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+# Unplug and replug the SpaceMouse
+```
+
+### Step 5: Verify udev rule and user group
+
+**Check that the rule is applied:**
+```bash
+ls -l /dev/hidraw*
+# Optionally, identify which hidraw node is the SpaceMouse and check IDs:
+udevadm info -a -n /dev/hidrawX | grep -E 'idVendor|idProduct' -m1 -A1
+```
+
+**Ensure your user is in the `plugdev` group:**
+```bash
+groups | grep plugdev || sudo usermod -aG plugdev "$USER"
+# Log out and log back in for group changes to take effect
+```
+
+### Step 6: Test SpaceMouse detection
+
+From Python, confirm the device is visible (replace `<PID>` with your product ID in hex, e.g., `0xc635`):
+
+```python
+import json
+import hid
+print(json.dumps([{'vid': hex(d['vendor_id']), 
+                   'pid': hex(d['product_id']), 
+                   'product': d.get('product_string')} 
+                  for d in hid.enumerate(0x256f, 0x<PID>)], indent=2))
+```
+
+### Step 7: Update example scripts
+
+Update the SpaceMouse `vendor_id` and `product_id` in your example scripts (e.g., `run_deoxys_with_space_mouse.py`) to match your device.
+
 ### Troubleshooting
 
-If you encounter protobuf-related errors (see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)), ensure:
-- Protobuf version is pinned: `pip install "protobuf>=3.20.0,<3.21.0"`
-- System protobuf compiler matches: `protoc --version` (should be >= 3.19.0)
-- Rebuild if needed: `rm -rf build && mkdir build && cd build && cmake .. -DBUILD_DEOXYS=ON && make -j$(nproc)`
-# Control the robot
+If you see the SpaceMouse entry in the enumeration but still get `OSError: open failed` when running examples:
+1. Re-check that the udev rule uses your exact PID (product ID)
+2. Ensure you replugged the device after reloading rules
+3. Verify your user is in the `plugdev` group and you've logged out/in
+4. As a permissions sanity check, try running with `sudo`; if it works with sudo but not without, the udev rule is the issue
 
 ## Commands on Desktop
 
 Here is a quick guide to run `Deoxys`.
 
-Under `deoxys_control/deoxys`,  run
+Under `deoxys_control/deoxys`, run:
 
-``` shell
-python examples/run_deoxys_with_space_mouse.py 
+```shell
+python examples/run_deoxys_with_space_mouse.py
 ```
 
-Change 1) spacemouse vendor_id and product_id ([here](https://github.com/UT-Austin-RPL/deoxys_control/blob/eb8d69f7f0838389fca81cac6b250ba05fc97f92/deoxys/examples/run_deoxys_with_space_mouse.py#L19)) 2) robot interface 
-config ([here](https://github.com/UT-Austin-RPL/deoxys_control/blob/eb8d69f7f0838389fca81cac6b250ba05fc97f92/deoxys/examples/run_deoxys_with_space_mouse.py#L16)) if necessary.
+**Before running**, make sure to:
+1. Set up your SpaceMouse (see [SpaceMouse Setup](#spacemouse-setup) above)
+2. Update the SpaceMouse `vendor_id` and `product_id` in the example script if needed
+3. Configure the robot interface settings (IP addresses, ports, etc.) in your config file
