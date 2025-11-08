@@ -25,6 +25,11 @@ from you simulation codebase to real robot experiments!
 https://user-images.githubusercontent.com/21077484/206338997-8dbaa128-dc63-4911-84ca-64d80a05673f.mp4
 
 
+## Modifications
+
+> **Note:** This is a modified fork of the original [UT-Austin-RPL/deoxys_control](https://github.com/UT-Austin-RPL/deoxys_control) repository. This fork includes improvements to the build system (CMake) and enhancements to both client-side (Python) and server-side (C++) behavior, focusing on robustness, error handling, and graceful shutdown mechanisms.
+>
+> For detailed information about the modifications, please see [MODIFICATIONS.md](MODIFICATIONS.md).
 
 ## Cite our codebase
 
@@ -43,56 +48,137 @@ If you use this codebase for your research projects, please cite our codebase ba
 
 # Installation of codebase
 
-Overall, the installation has three parts:
-1. Install dependencies by running `InstallPackage`
-2. Compile desktop-side codebase (Python)
-3. Compile NUC-side codebase (C++)
+The installation consists of two parts:
+1. **Client-side (Desktop)**: Python interface for controlling the robot
+2. **Server-side (Intel NUC)**: C++ real-time control interface running on the robot's control PC
 
-Here are the details. For more information, please refer to the [Codebase Installation Page](https://ut-austin-rpl.github.io/deoxys-docs/html/installation/codebase_installation.html).
+## Server-Side Installation (Intel NUC)
 
-Clone this repo to the robot workspace directory on Desktop computer (e.g. `/home/USERNAME/robot-control-ws`)
+### Recommended: Using Servobox
 
-``` shell
-cd deoxys_control/deoxys
-```
+The easiest way to install and run the server-side components is using [Servobox](https://servobox.dev), a utility for setting up an optimized RT VM as well as installing robotics control stacks.
 
-## Install dependencies
-
-Run the `InstallPackage` file to install necessary packages.
-``` shell
-./InstallPackage
-```
-
-
-## Deoxys - Desktop
-
-Make sure that you are in your python virtual environment before
-	building this.
-``` shell
-make -j build_deoxys=1
-```
-
-And install all the python dependencies (feel free to add pull requests if anything is missing) from `deoxys_control/requirements.txt`, by doing:
+**Install the package:**
 ```shell
+servobox pkg-install deoxys-control
+```
+
+**Run the server:**
+```shell
+servobox run deoxys-control
+```
+
+This will start both the `franka-interface` (arm control) and `gripper-interface` services automatically.
+
+## Client-Side Installation (Desktop)
+
+### Prerequisites
+
+**System dependencies (Ubuntu 24.04 / Debian):**
+```shell
+sudo apt-get update
+sudo apt-get install -y \
+    build-essential \
+    cmake \
+    protobuf-compiler \
+    libprotobuf-dev \
+    pkg-config \
+    libzmq3-dev
+```
+
+### Recommended: Using Micromamba
+
+For a reliable Python environment setup, we recommend using [micromamba](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html) (a fast, cross-platform package manager).
+
+**1. Install micromamba** (if not already installed):
+```shell
+# Download and install micromamba
+curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj bin/micromamba
+./bin/micromamba shell init -s bash -p ~/micromamba
+source ~/.bashrc  # or restart your terminal
+```
+
+**2. Create and activate the environment:**
+```shell
+cd deoxys_control/deoxys
+
+# Create a new environment with Python 3.10 or 3.11
+# Note: Python 3.12+ may have compatibility issues with some dependencies
+micromamba create -n deoxys python=3.10 -y
+micromamba activate deoxys
+```
+
+**3. Install Python dependencies (order matters!):**
+```shell
+# Install core dependencies from conda-forge (more reliable)
+micromamba install -c conda-forge \
+    pyzmq \
+    pyyaml \
+    numpy \
+    pillow \
+    cmake \
+    pkg-config \
+    -y
+
+# CRITICAL: Pin protobuf to compatible version to avoid descriptor errors
+# See TROUBLESHOOTING.md for details
+pip install "protobuf>=3.20.0,<3.21.0"
+
+# Install remaining Python dependencies
 pip install -U -r requirements.txt
+
+# Verify protobuf version (should show 3.20.x)
+python -c "import google.protobuf as p; print(f'protobuf version: {p.__version__}')"
 ```
 
-## Franka Interface - Intel NUC
+**4. Build the Python bindings:**
+```shell
+# Create build directory
+mkdir -p build
+cd build
 
-Franka Interface is the part which is supposed to run on NUC. Run this 
-command in directory `deoxys_control/deoxys/` on Intel NUC. 
+# Configure CMake with BUILD_DEOXYS enabled
+# Set PYTHON_MODULE_OUTPUT_DIRECTORY to the deoxys directory (parent of build/)
+# This ensures proto files are installed to deoxys/proto/ via the install step
+cmake .. \
+    -DBUILD_DEOXYS=ON \
+    -DPYTHON_MODULE_OUTPUT_DIRECTORY="$(pwd)/.."
 
-``` shell
-make -j build_franka=1
+# Build (adjust -j to number of CPU cores)
+make -j$(nproc)
+
+# Install the protobuf Python modules to the deoxys package
+make install
+
+# Return to deoxys directory
+cd ..
 ```
 
-## A laundry list of pointers:
-   - [How to turn on/off the robot](https://ut-austin-rpl.github.io/deoxys-docs/html/tutorials/running_robots.html)
-   - [How to install spacemouse](https://ut-austin-rpl.github.io/deoxys-docs/html/tutorials/using_teleoperation_devices.html)
-   - [How to set up the RTOS](https://ut-austin-rpl.github.io/deoxys-docs/html/installation/system_prerequisite.html)
-   - [How to record and replay a trajectory](https://ut-austin-rpl.github.io/deoxys-docs/html/tutorials/record_and_replay.html)
-   - [How to write a simple motor program](https://ut-austin-rpl.github.io/deoxys-docs/html/tutorials/handcrafting_motor_program.html)
+**5. Verify protobuf module structure:**
+```shell
+# Check that proto files are in the correct location
+ls -la deoxys/proto/franka_interface/*.py
+# Should show: franka_controller_pb2.py and franka_robot_state_pb2.py
+```
 
+**6. Set up Python path:**
+```shell
+# Add the current directory to PYTHONPATH so Python can find the deoxys package
+# Add this to your ~/.bashrc or run it each time you activate the environment
+export PYTHONPATH="${PWD}:${PYTHONPATH}"
+```
+
+**7. Verify installation:**
+```shell
+python -c "import deoxys; print('Deoxys installed successfully')"
+```
+
+### Troubleshooting
+
+If you encounter protobuf-related errors (see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)), ensure:
+- Protobuf version is pinned: `pip install "protobuf>=3.20.0,<3.21.0"`
+- System protobuf compiler matches: `protoc --version` (should be >= 3.19.0)
+- Rebuild if needed: `rm -rf build && mkdir build && cd build && cmake .. -DBUILD_DEOXYS=ON && make -j$(nproc)`
 # Control the robot
 
 ## Commands on Desktop
@@ -107,19 +193,3 @@ python examples/run_deoxys_with_space_mouse.py
 
 Change 1) spacemouse vendor_id and product_id ([here](https://github.com/UT-Austin-RPL/deoxys_control/blob/eb8d69f7f0838389fca81cac6b250ba05fc97f92/deoxys/examples/run_deoxys_with_space_mouse.py#L19)) 2) robot interface 
 config ([here](https://github.com/UT-Austin-RPL/deoxys_control/blob/eb8d69f7f0838389fca81cac6b250ba05fc97f92/deoxys/examples/run_deoxys_with_space_mouse.py#L16)) if necessary.
-
-You might also check and change the PC / NUC names [here](https://github.com/UT-Austin-RPL/deoxys_control/blob/master/deoxys/config/charmander.yml). 
-
-## Commands on Control PC (Intel NUC)
-
-Under `deoxys_control/deoxys`, run two commands. One for real-time control of the arm, one for non
-real-time control of the gripper.
-
-``` shell
-bin/franka-interface config/charmander.yml
-```
-
-``` shell
-bin/gripper-interface config/charmander.yml
-```
-
